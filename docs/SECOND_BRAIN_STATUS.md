@@ -19,9 +19,8 @@ That created a false impression that the project had been retired. The actual se
 - Runtime path: `/Users/gia/claude-automations/website-critique`
 - LaunchAgent: `com.glenfarrell.website-critique`
 - Source-of-truth repo: `/Users/glenfarrell/Documents/GitHub/website-critique`
-- GitHub status: should be pushed to a dedicated GitHub repository
+- GitHub repo: https://github.com/glenfarrell-cloak/website-critique
 - Notion active registry: https://app.notion.com/p/391d15a4886c8100a8a8fd1438782171
-- Notion GitHub publication task: https://app.notion.com/p/391d15a4886c816a8f68e92d55f48013
 
 ## Cleanup Rule
 
