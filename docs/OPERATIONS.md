@@ -77,3 +77,12 @@ A prior design note considered replacing path-based portal routes with per-servi
 ```text
 https://portal.glenfarrell.net/WebsiteCritique/
 ```
+
+## GitHub Publication Status
+
+Local Git is initialized and committed. Remote GitHub publication is pending because `glenfarrell/website-critique` does not exist yet, and this environment has no `gh`/`hub` CLI or GitHub token available to create a repository. Once the repo exists, push with:
+
+```sh
+git remote add origin git@github.com:<owner>/website-critique.git
+git push -u origin main
+```
