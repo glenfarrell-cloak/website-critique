@@ -6,6 +6,8 @@
 - Business surface: Modern Consulting Group executive website review
 - Live URL: https://portal.glenfarrell.net/WebsiteCritique/
 - Notion closeout breadcrumb: `Closeout - Website Critique Portal Migration to Cloak`
+- Notion active registry: https://app.notion.com/p/391d15a4886c8100a8a8fd1438782171
+- Notion GitHub publication task: https://app.notion.com/p/391d15a4886c816a8f68e92d55f48013
 - Legacy planning folder: `PROJECTS/Website Strategy Executive Critique`
 
 ## Production Runtime
@@ -80,7 +82,15 @@ https://portal.glenfarrell.net/WebsiteCritique/
 
 ## GitHub Publication Status
 
-Local Git is initialized and committed. Remote GitHub publication is pending because `glenfarrell/website-critique` does not exist yet, and this environment has no `gh`/`hub` CLI or GitHub token available to create a repository. Once the repo exists, push with:
+Local Git is initialized and committed. Remote GitHub publication is pending because `glenfarrell/website-critique` does not exist yet, and this environment has no `gh`/`hub` CLI or GitHub token available to create a repository. Cloak has `gh`, but it is not logged in. GitHub SSH auth works, so pushing should work after the remote repo exists.
+
+The open Notion task tracking this gap is:
+
+```text
+https://app.notion.com/p/391d15a4886c816a8f68e92d55f48013
+```
+
+Once the repo exists, push with:
 
 ```sh
 git remote add origin git@github.com:<owner>/website-critique.git

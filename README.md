@@ -12,6 +12,7 @@ Active production project for the Modern Consulting Group executive website revi
 - LaunchAgent: `/Users/gia/Library/LaunchAgents/com.glenfarrell.website-critique.plist`
 - Service label: `com.glenfarrell.website-critique`
 - Local service port on Cloak: `8081`
+- Notion active registry: https://app.notion.com/p/391d15a4886c8100a8a8fd1438782171
 
 This project was previously mistaken for an archived Claude workspace because the old planning/source notes were moved into the June 2026 local cleanup archive after the Cloak migration closeout. The live service itself remained active on Cloak. Treat this repository as the source-of-truth going forward.
 
