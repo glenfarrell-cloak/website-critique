@@ -37,6 +37,18 @@ Current service command:
 /opt/homebrew/bin/node /Users/gia/claude-automations/website-critique/server.js
 ```
 
+Website analysis uses Playwright for JavaScript-rendered sites. If the local Chrome app is not available, install the bundled Chromium browser after `npm install`:
+
+```sh
+npx playwright install chromium
+```
+
+You can also point the service at an existing browser with:
+
+```sh
+PLAYWRIGHT_CHROMIUM_EXECUTABLE=/path/to/chrome-or-chromium
+```
+
 ## Verify Production
 
 ```sh

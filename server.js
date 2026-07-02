@@ -21,6 +21,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const https = require('https');
+const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 8081;
@@ -75,16 +76,16 @@ app.post('/api/analyze', async (req, res) => {
     let url = body.website_url.trim();
     if (!url.startsWith('http')) url = 'https://' + url;
 
-    // Fetch website
-    let siteContent = '';
+    // Fetch website evidence
+    let siteEvidence = null;
     try {
-      siteContent = await fetchWebsite(url);
+      siteEvidence = await fetchWebsiteEvidence(url);
     } catch (e) {
-      siteContent = `[Could not fetch ${url}: ${e.message}]`;
+      siteEvidence = buildFailedEvidence(url, e);
     }
 
     // Generate report
-    const report = await generateReport(body, siteContent, url);
+    const report = await generateReport(body, siteEvidence, url);
 
     // Store
     const id = crypto.randomBytes(6).toString('hex');
@@ -95,7 +96,8 @@ app.post('/api/analyze', async (req, res) => {
       email: body.email,
       website_url: url,
       form_data: body,
-      report
+      report,
+      evidence_summary: report.evidence_summary
     });
 
     // Emails (non-blocking)
@@ -133,11 +135,13 @@ app.get(`${BASE}/report/:id`, (req, res) => {
   res.send(reportPageHTML(row, row.report));
 });
 
-app.listen(PORT, () => console.log(`Website Critique portal running on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Website Critique portal running on port ${PORT}`));
+}
 
 // ── AI Report Generation ───────────────────────────────────────────────────────
-async function generateReport(form, siteContent, url) {
-  const prompt = buildPrompt(form, siteContent, url);
+async function generateReport(form, siteEvidence, url) {
+  const prompt = buildPrompt(form, siteEvidence, url);
 
   const body = JSON.stringify({
     model: 'claude-sonnet-4-6',
@@ -154,23 +158,41 @@ async function generateReport(form, siteContent, url) {
   let text = data.content?.[0]?.text || '';
   const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (match) text = match[1];
-  return JSON.parse(text.trim());
+  return applyEvidenceGuardrails(JSON.parse(text.trim()), siteEvidence);
 }
 
-function buildPrompt(form, siteContent, url) {
+function buildPrompt(form, siteEvidence, url) {
+  const evidence = normalizeEvidenceForPrompt(siteEvidence);
   return `Analyze this website and produce a concise Executive Website & Positioning Review.
 
 WEBSITE URL: ${url}
-WEBSITE CONTENT: ${siteContent.slice(0, 10000)}
+
+WEBSITE EVIDENCE JSON:
+${JSON.stringify(evidence, null, 2).slice(0, 18000)}
 
 CLIENT CONTEXT (from intake form):
 - Industry: ${form.industry}
 - Primary concern (self-identified): ${form.concern || 'Not specified'}
 
+EVIDENCE RULES:
+- Ground every major criticism in the WEBSITE EVIDENCE JSON.
+- Never say "no CTA", "no booking path", "no visible call-to-action", "no conversion path", "no lead mechanism", or similar if observed_ctas contains relevant CTA evidence.
+- If evidence coverage is low, say the finding is uncertain because extraction coverage was low. Do not punish the business as if the feature is definitely absent.
+- Use "not observed in fetched evidence" only when coverage is adequate and the evidence truly lacks the item.
+- Distinguish "missing" from "present but weak/unclear/underdeveloped".
+- Treat nav, header, body, and footer CTAs as valid conversion-path evidence.
+
 Return ONLY this JSON:
 {
   "business_name": "name from website",
   "website_url": "${url}",
+  "evidence_summary": {
+    "extraction_mode": "static|rendered|script_fallback|failed",
+    "confidence": "high|medium|low",
+    "warnings": ["short warning"],
+    "observed_ctas": ["short CTA label or empty"],
+    "observed_conversion_paths": ["short path or empty"]
+  },
   "composite_score": <0-80>,
   "maturity_classification": "Emerging|Established|Growth-Ready|Premium Operator|Category Leader",
   "executive_summary": "3 punchy sentences: what the site does well, where it fails, what's at stake",
@@ -206,40 +228,432 @@ Return ONLY this JSON:
 }`;
 }
 
-// ── Fetch website content ─────────────────────────────────────────────────────
-function fetchWebsite(url) {
+// ── Fetch website evidence ────────────────────────────────────────────────────
+const CTA_RE = /\b(book|schedule|call|consult|contact|strategy session|discovery|calendar|calendly|demo|estimate|quote|get started|talk)\b/i;
+const ABSOLUTE_MISSING_CTA_RE = /\b(no|zero|without|lacks?|missing)\b.{0,80}\b(visible )?(cta|call-to-action|conversion path|lead mechanism|booking path|booking option|next step)\b/i;
+
+async function fetchWebsiteEvidence(url) {
+  const warnings = [];
+  const staticFetch = await fetchRawWebsite(url);
+  const staticEvidence = extractStaticEvidence(staticFetch.html, staticFetch.finalUrl || url);
+  const spaShell = isLikelySpaShell(staticFetch.html, staticEvidence);
+
+  let renderedEvidence = null;
+  if (spaShell || (staticEvidence.text.length < 800 && staticEvidence.ctas.length === 0)) {
+    try {
+      renderedEvidence = await renderWebsiteEvidence(staticFetch.finalUrl || url);
+    } catch (err) {
+      warnings.push(`render_failed: ${err.message}`);
+    }
+  }
+
+  let scriptEvidence = null;
+  if (!renderedEvidence || renderedEvidence.ctas.length === 0) {
+    try {
+      scriptEvidence = await extractScriptFallbackEvidence(staticFetch.html, staticFetch.finalUrl || url);
+    } catch (err) {
+      warnings.push(`script_fallback_failed: ${err.message}`);
+    }
+  }
+
+  const best = chooseBestEvidence(staticEvidence, renderedEvidence, scriptEvidence);
+  if (spaShell) warnings.push('spa_shell_detected');
+  if (best.text.length < 500) warnings.push('low_text_coverage');
+  if (best.mode === 'script_fallback') warnings.push('cta_text_found_in_script_bundle_not_rendered_dom');
+
+  const confidence = best.mode === 'rendered' && best.text.length >= 800 ? 'high'
+    : best.ctas.length > 0 && best.text.length >= 250 ? 'medium'
+    : 'low';
+
+  return {
+    url,
+    final_url: staticFetch.finalUrl || url,
+    extraction: {
+      mode: best.mode,
+      confidence,
+      warnings: [...new Set([...warnings, ...best.warnings])],
+      static_status: staticFetch.statusCode,
+      static_html_bytes: Buffer.byteLength(staticFetch.html || '', 'utf8'),
+      static_text_length: staticEvidence.text.length,
+      rendered_text_length: renderedEvidence ? renderedEvidence.text.length : 0
+    },
+    content: best
+  };
+}
+
+function fetchRawWebsite(url, redirects = 0) {
   return new Promise((resolve, reject) => {
-    const mod = url.startsWith('https') ? https : require('http');
+    if (redirects > 5) return reject(new Error('Too many redirects'));
+    const mod = url.startsWith('https') ? https : http;
     const req = mod.get(url, {
       headers: {
         'User-Agent': 'MCG-WebsiteReview/1.0 (Strategic Assessment; hello@modernconsultinggroup.com)',
-        'Accept': 'text/html'
+        'Accept': 'text/html,application/xhtml+xml'
       },
-      timeout: 10000
+      timeout: 12000
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchWebsite(res.headers.location).then(resolve).catch(reject);
+        const nextUrl = new URL(res.headers.location, url).toString();
+        return fetchRawWebsite(nextUrl, redirects + 1).then(resolve).catch(reject);
       }
       let data = '';
-      res.on('data', chunk => { data += chunk; if (data.length > 500000) req.destroy(); });
-      res.on('end', () => resolve(stripHTML(data)));
+      res.on('data', chunk => {
+        data += chunk;
+        if (data.length > 750000) req.destroy(new Error('Response too large'));
+      });
+      res.on('end', () => resolve({ html: data, statusCode: res.statusCode, finalUrl: url }));
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+    req.on('timeout', () => { req.destroy(new Error('Timeout')); });
   });
 }
 
+function extractStaticEvidence(html, url) {
+  const title = firstMatch(html, /<title[^>]*>([\s\S]*?)<\/title>/i);
+  const metaDescription = firstMatch(html, /<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i)
+    || firstMatch(html, /<meta[^>]+content=["']([^"']*)["'][^>]+name=["']description["']/i);
+  const navHtml = collectTagHtml(html, 'nav').join(' ');
+  const footerHtml = collectTagHtml(html, 'footer').join(' ');
+  const links = extractLinks(html, url);
+  const buttons = extractButtons(html);
+  const headings = extractHeadings(html);
+  const forms = extractForms(html);
+  const navLinks = extractLinks(navHtml, url);
+  const footerLinks = extractLinks(footerHtml, url);
+  const ctas = dedupeByText([...links, ...buttons].filter(item => CTA_RE.test(`${item.text} ${item.href || ''}`)));
+  return {
+    mode: 'static',
+    warnings: [],
+    title,
+    meta_description: metaDescription,
+    text: stripHTML(html),
+    text_sample: stripHTML(html).slice(0, 9000),
+    headings,
+    nav_links: navLinks,
+    footer_links: footerLinks,
+    links: links.slice(0, 120),
+    buttons: buttons.slice(0, 80),
+    forms,
+    ctas: ctas.slice(0, 30)
+  };
+}
+
+async function renderWebsiteEvidence(url) {
+  const playwright = require('playwright');
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || findChromeExecutable();
+  const launchOptions = { headless: true };
+  if (executablePath) launchOptions.executablePath = executablePath;
+
+  const browser = await playwright.chromium.launch(launchOptions);
+  try {
+    const page = await browser.newPage({
+      userAgent: 'MCG-WebsiteReview/1.0 (Strategic Assessment; hello@modernconsultinggroup.com)'
+    });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(1200);
+
+    const result = await page.evaluate(() => {
+      const clean = value => (value || '').replace(/\s+/g, ' ').trim();
+      const locationOf = el => {
+        if (el.closest('header')) return 'header';
+        if (el.closest('nav')) return 'nav';
+        if (el.closest('main')) return 'main';
+        if (el.closest('footer')) return 'footer';
+        if (el.closest('section')) return 'section';
+        return 'body';
+      };
+      const linkFor = a => ({ text: clean(a.innerText || a.textContent), href: a.href || '', location: locationOf(a) });
+      const buttonFor = b => ({ text: clean(b.innerText || b.textContent || b.getAttribute('aria-label')), href: '', location: locationOf(b) });
+      const links = Array.from(document.querySelectorAll('a')).map(linkFor).filter(a => a.text || a.href);
+      const buttons = Array.from(document.querySelectorAll('button,[role="button"]')).map(buttonFor).filter(b => b.text);
+      const forms = Array.from(document.querySelectorAll('form')).map(form => ({
+        action: form.action || '',
+        method: form.method || 'get',
+        text: clean(form.innerText || form.textContent),
+        inputs: Array.from(form.querySelectorAll('input,textarea,select')).map(input => clean(input.name || input.id || input.placeholder || input.type)).filter(Boolean).slice(0, 20)
+      }));
+      return {
+        title: clean(document.title),
+        meta_description: clean(document.querySelector('meta[name="description"]')?.content),
+        text: clean(document.body?.innerText || document.body?.textContent),
+        headings: Array.from(document.querySelectorAll('h1,h2,h3')).map(h => ({ level: h.tagName.toLowerCase(), text: clean(h.innerText || h.textContent) })).filter(h => h.text).slice(0, 80),
+        nav_links: links.filter(a => a.location === 'nav' || a.location === 'header').slice(0, 80),
+        footer_links: links.filter(a => a.location === 'footer').slice(0, 80),
+        links: links.slice(0, 140),
+        buttons: buttons.slice(0, 100),
+        forms
+      };
+    });
+
+    const ctas = dedupeByText([...result.links, ...result.buttons].filter(item => CTA_RE.test(`${item.text} ${item.href || ''}`)));
+    return {
+      mode: 'rendered',
+      warnings: [],
+      ...result,
+      text_sample: result.text.slice(0, 12000),
+      ctas: ctas.slice(0, 40)
+    };
+  } finally {
+    await browser.close();
+  }
+}
+
+async function extractScriptFallbackEvidence(html, url) {
+  const scriptSrcs = Array.from(html.matchAll(/<script[^>]+src=["']([^"']+)["'][^>]*>/gi))
+    .map(match => new URL(match[1], url).toString())
+    .slice(0, 8);
+  const snippets = [];
+  for (const src of scriptSrcs) {
+    const fetched = await fetchRawAsset(src);
+    const matches = extractReadableCtaStrings(fetched).slice(0, 30);
+    snippets.push(...matches.map(text => ({ text, href: src, location: 'script' })));
+  }
+  const ctas = dedupeByText(snippets.filter(item => CTA_RE.test(item.text)));
+  return {
+    mode: 'script_fallback',
+    warnings: [],
+    title: firstMatch(html, /<title[^>]*>([\s\S]*?)<\/title>/i),
+    meta_description: '',
+    text: ctas.map(c => c.text).join(' '),
+    text_sample: ctas.map(c => c.text).join('\n').slice(0, 5000),
+    headings: [],
+    nav_links: [],
+    footer_links: [],
+    links: [],
+    buttons: [],
+    forms: [],
+    ctas: ctas.slice(0, 30)
+  };
+}
+
+function fetchRawAsset(url) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? https : http;
+    const req = mod.get(url, { headers: { 'User-Agent': 'MCG-WebsiteReview/1.0' }, timeout: 12000 }, (res) => {
+      let data = '';
+      res.on('data', chunk => {
+        data += chunk;
+        if (data.length > 1000000) req.destroy(new Error('Asset too large'));
+      });
+      res.on('end', () => resolve(data));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('Timeout')));
+  });
+}
+
+function chooseBestEvidence(staticEvidence, renderedEvidence, scriptEvidence) {
+  if (renderedEvidence && (renderedEvidence.text.length > staticEvidence.text.length * 1.5 || renderedEvidence.ctas.length >= staticEvidence.ctas.length)) {
+    return renderedEvidence;
+  }
+  if (staticEvidence.ctas.length > 0 && staticEvidence.text.length >= 500) return staticEvidence;
+  if (scriptEvidence && scriptEvidence.ctas.length > 0) return scriptEvidence;
+  return renderedEvidence || staticEvidence;
+}
+
+function isLikelySpaShell(html, evidence) {
+  return /<div[^>]+id=["']root["']/i.test(html)
+    && /<script[^>]+type=["']module["']/i.test(html)
+    && evidence.text.length < 600;
+}
+
 function stripHTML(html) {
-  return html
+  return decodeEntities((html || '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, ' ')
-    .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, ' ')
-    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&[a-z]+;/gi, ' ')
     .replace(/\s{2,}/g, ' ')
-    .trim();
+    .trim());
+}
+
+function collectTagHtml(html, tag) {
+  return Array.from((html || '').matchAll(new RegExp(`<${tag}[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi'))).map(m => m[0]);
+}
+
+function extractLinks(html, baseUrl) {
+  return Array.from((html || '').matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)).map(match => {
+    const attrs = match[1] || '';
+    const href = firstMatch(attrs, /\bhref=["']([^"']+)["']/i);
+    return {
+      text: stripHTML(match[2]),
+      href: href ? safeAbsoluteUrl(href, baseUrl) : '',
+      location: 'html'
+    };
+  }).filter(link => link.text || link.href);
+}
+
+function extractButtons(html) {
+  return Array.from((html || '').matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/gi))
+    .map(match => ({ text: stripHTML(match[1]), href: '', location: 'html' }))
+    .filter(button => button.text);
+}
+
+function extractHeadings(html) {
+  return Array.from((html || '').matchAll(/<(h[1-3])\b[^>]*>([\s\S]*?)<\/\1>/gi))
+    .map(match => ({ level: match[1].toLowerCase(), text: stripHTML(match[2]) }))
+    .filter(h => h.text)
+    .slice(0, 80);
+}
+
+function extractForms(html) {
+  return Array.from((html || '').matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi)).map(match => ({
+    action: firstMatch(match[1], /\baction=["']([^"']+)["']/i),
+    method: firstMatch(match[1], /\bmethod=["']([^"']+)["']/i) || 'get',
+    text: stripHTML(match[2]).slice(0, 500),
+    inputs: Array.from(match[2].matchAll(/<(input|textarea|select)\b([^>]*)>/gi)).map(input =>
+      firstMatch(input[2], /\b(name|id|placeholder|type)=["']([^"']+)["']/i, 2)
+    ).filter(Boolean).slice(0, 20)
+  }));
+}
+
+function extractReadableCtaStrings(source) {
+  const matches = Array.from((source || '').matchAll(/["'`]([^"'`]{3,140})["'`]/g))
+    .map(match => decodeEntities(match[1]).replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(text => /[A-Za-z]/.test(text) && CTA_RE.test(text));
+  return [...new Set(matches)].slice(0, 80);
+}
+
+function normalizeEvidenceForPrompt(siteEvidence) {
+  if (!siteEvidence || typeof siteEvidence === 'string') {
+    return { extraction: { mode: 'unknown', confidence: 'low', warnings: ['legacy_or_missing_evidence'] }, content_text: String(siteEvidence || '').slice(0, 10000) };
+  }
+  const content = siteEvidence.content || {};
+  return {
+    url: siteEvidence.url,
+    final_url: siteEvidence.final_url,
+    extraction: siteEvidence.extraction,
+    title: content.title,
+    meta_description: content.meta_description,
+    headings: content.headings,
+    observed_ctas: summarizeCtas(content.ctas),
+    observed_conversion_paths: summarizeConversionPaths(content),
+    nav_links: (content.nav_links || []).slice(0, 40),
+    footer_links: (content.footer_links || []).slice(0, 40),
+    forms: content.forms || [],
+    body_text_sample: content.text_sample || ''
+  };
+}
+
+function applyEvidenceGuardrails(report, siteEvidence) {
+  const content = siteEvidence?.content || {};
+  const ctas = summarizeCtas(content.ctas);
+  const paths = summarizeConversionPaths(content);
+  const warnings = siteEvidence?.extraction?.warnings || [];
+  report.evidence_summary = {
+    extraction_mode: siteEvidence?.extraction?.mode || 'failed',
+    confidence: siteEvidence?.extraction?.confidence || 'low',
+    warnings,
+    observed_ctas: ctas,
+    observed_conversion_paths: paths
+  };
+
+  if (ctas.length > 0 && Array.isArray(report.top_weaknesses)) {
+    report.top_weaknesses = report.top_weaknesses.map(weakness => {
+      const text = `${weakness.title || ''} ${weakness.detail || ''} ${weakness.fix || ''}`;
+      if (!ABSOLUTE_MISSING_CTA_RE.test(text)) return weakness;
+      return {
+        ...weakness,
+        title: 'Conversion Path Needs Stronger Qualification',
+        detail: `The analyzer observed CTA evidence (${ctas.slice(0, 3).join('; ')}), so the issue is not absence of a booking path. Review whether those CTAs are prominent, specific, and tied to a qualified next step.`,
+        fix: 'Keep the booking CTAs, then strengthen surrounding copy with who should book, what the call covers, and what happens next.'
+      };
+    });
+  }
+
+  if (siteEvidence?.extraction?.confidence === 'low') {
+    report.executive_summary = `${report.executive_summary || ''} Note: extraction confidence was low, so missing-feature claims should be treated as preliminary.`.trim();
+  }
+  return report;
+}
+
+function buildFailedEvidence(url, err) {
+  return {
+    url,
+    final_url: url,
+    extraction: {
+      mode: 'failed',
+      confidence: 'low',
+      warnings: [`fetch_failed: ${err.message}`],
+      static_status: null,
+      static_html_bytes: 0,
+      static_text_length: 0,
+      rendered_text_length: 0
+    },
+    content: {
+      mode: 'failed',
+      warnings: [],
+      title: '',
+      meta_description: '',
+      text: '',
+      text_sample: '',
+      headings: [],
+      nav_links: [],
+      footer_links: [],
+      links: [],
+      buttons: [],
+      forms: [],
+      ctas: []
+    }
+  };
+}
+
+function summarizeCtas(ctas = []) {
+  return dedupeByText(ctas)
+    .map(cta => `${cta.text || cta.href}${cta.location ? ` (${cta.location})` : ''}`.trim())
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function summarizeConversionPaths(content = {}) {
+  const items = [...(content.ctas || []), ...(content.forms || [])];
+  return items.map(item => {
+    if (item.inputs) return `form: ${item.inputs.join(', ') || item.text || item.action || 'form detected'}`;
+    return `${item.text || item.href}${item.href ? ` -> ${item.href}` : ''}`;
+  }).filter(Boolean).slice(0, 12);
+}
+
+function dedupeByText(items = []) {
+  const seen = new Set();
+  return items.filter(item => {
+    const key = `${item.text || ''}|${item.href || ''}`.toLowerCase();
+    if (!key.trim() || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function firstMatch(value, regex, group = 1) {
+  const match = (value || '').match(regex);
+  return match ? decodeEntities(match[group] || '').trim() : '';
+}
+
+function safeAbsoluteUrl(href, baseUrl) {
+  try { return new URL(href, baseUrl).toString(); }
+  catch { return href; }
+}
+
+function decodeEntities(value) {
+  return String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
+}
+
+function findChromeExecutable() {
+  const candidates = [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser'
+  ];
+  return candidates.find(candidate => fs.existsSync(candidate)) || '';
 }
 
 // ── HTTP API helper ───────────────────────────────────────────────────────────
@@ -1010,6 +1424,7 @@ function renderPreview(r, email, id){
 // ── Full report page ──────────────────────────────────────────────────────────
 function reportPageHTML(row, r) {
   const scores = r.scores || {};
+  const evidence = r.evidence_summary || row.evidence_summary || {};
   const cats = [
     ['Brand Clarity','brand_clarity'],['Strategic Positioning','strategic_positioning'],
     ['Commercial Readiness','commercial_readiness'],['Executive Credibility','executive_credibility'],
@@ -1024,6 +1439,9 @@ function reportPageHTML(row, r) {
       <td style="padding:12px 0;border-bottom:1px solid #1e1e1e;font-size:11px;color:#c9a96e;text-align:right">${s.grade}</td>
     </tr>`;
   }).join('');
+  const evidenceWarnings = (evidence.warnings || []).map(w => `<li>${w}</li>`).join('');
+  const evidenceCtas = (evidence.observed_ctas || []).map(cta => `<li>${cta}</li>`).join('');
+  const evidencePaths = (evidence.observed_conversion_paths || []).map(path => `<li>${path}</li>`).join('');
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1054,6 +1472,11 @@ table{width:100%;border-collapse:collapse}
 .ot{background:rgba(201,169,110,.08);border:1px solid rgba(201,169,110,.25);border-radius:10px;padding:28px;text-align:center;margin:32px 0}
 .ot-l{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#c9a96e;margin-bottom:10px}
 .ot-t{font-size:18px;font-weight:600;color:#fff;line-height:1.4}
+.evidence-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:16px 0}
+.mini{background:#111;border:1px solid #1e1e1e;border-radius:8px;padding:14px}
+.mini-k{font-size:10px;font-weight:700;letter-spacing:.08em;color:#555;text-transform:uppercase;margin-bottom:4px}
+.mini-v{font-size:14px;font-weight:600;color:#fff}
+ul.evidence{margin:8px 0 0 18px;color:#888;font-size:13px;line-height:1.6}
 </style>
 </head>
 <body>
@@ -1081,6 +1504,16 @@ table{width:100%;border-collapse:collapse}
   <hr class="divider">
   <div class="tag">Score Breakdown</div>
   <table>${scoreRows}</table>
+
+  <hr class="divider">
+  <div class="tag">Evidence Coverage</div>
+  <div class="evidence-grid">
+    <div class="mini"><div class="mini-k">Extraction Mode</div><div class="mini-v">${evidence.extraction_mode || 'unknown'}</div></div>
+    <div class="mini"><div class="mini-k">Confidence</div><div class="mini-v">${evidence.confidence || 'unknown'}</div></div>
+  </div>
+  ${evidenceCtas ? `<p style="color:#ccc;font-size:14px;margin-top:14px">Observed CTAs</p><ul class="evidence">${evidenceCtas}</ul>` : '<p>No CTA evidence was observed in the extracted content.</p>'}
+  ${evidencePaths ? `<p style="color:#ccc;font-size:14px;margin-top:14px">Observed Conversion Paths</p><ul class="evidence">${evidencePaths}</ul>` : ''}
+  ${evidenceWarnings ? `<p style="color:#ccc;font-size:14px;margin-top:14px">Extraction Warnings</p><ul class="evidence">${evidenceWarnings}</ul>` : ''}
 
   <hr class="divider">
   <div class="tag">Top Strengths</div>
@@ -1157,3 +1590,12 @@ function buildEmailHTML(toName, url, r, id, siteUrl) {
 </div>
 </body></html>`;
 }
+
+module.exports = {
+  app,
+  fetchWebsiteEvidence,
+  buildPrompt,
+  stripHTML,
+  applyEvidenceGuardrails,
+  normalizeEvidenceForPrompt
+};
