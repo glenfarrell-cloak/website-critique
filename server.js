@@ -231,6 +231,7 @@ Return ONLY this JSON:
 // ── Fetch website evidence ────────────────────────────────────────────────────
 const CTA_RE = /\b(book|schedule|call|consult|contact|strategy session|discovery|calendar|calendly|demo|estimate|quote|get started|talk)\b/i;
 const ABSOLUTE_MISSING_CTA_RE = /\b(no|zero|without|lacks?|missing)\b.{0,80}\b(visible )?(cta|call-to-action|conversion path|lead mechanism|booking path|booking option|next step)\b/i;
+const INSTALL_CTA_RE = /\b(install|add|create|place)\b.{0,80}\b(cta|call-to-action|booking|calendar|conversion path|lead mechanism)\b/i;
 
 async function fetchWebsiteEvidence(url) {
   const warnings = [];
@@ -560,6 +561,22 @@ function applyEvidenceGuardrails(report, siteEvidence) {
         fix: 'Keep the booking CTAs, then strengthen surrounding copy with who should book, what the call covers, and what happens next.'
       };
     });
+  }
+
+  if (ctas.length > 0 && Array.isArray(report.top_recommendations)) {
+    report.top_recommendations = report.top_recommendations.map(recommendation => {
+      const action = recommendation.action || '';
+      if (!ABSOLUTE_MISSING_CTA_RE.test(action) && !INSTALL_CTA_RE.test(action)) return recommendation;
+      return {
+        ...recommendation,
+        action: 'Strengthen the observed booking path with clearer qualification copy and next-step expectations'
+      };
+    });
+  }
+
+  const conversion = report.scores?.conversion_readiness;
+  if (ctas.length > 0 && conversion?.note && ABSOLUTE_MISSING_CTA_RE.test(conversion.note)) {
+    conversion.note = 'Booking CTAs are present; assess prominence, specificity, and qualification strength rather than absence.';
   }
 
   if (siteEvidence?.extraction?.confidence === 'low') {
@@ -1594,6 +1611,7 @@ function buildEmailHTML(toName, url, r, id, siteUrl) {
 module.exports = {
   app,
   fetchWebsiteEvidence,
+  generateReport,
   buildPrompt,
   stripHTML,
   applyEvidenceGuardrails,

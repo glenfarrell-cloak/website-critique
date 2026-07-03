@@ -102,11 +102,23 @@ test('fetchWebsiteEvidence renders SPA shell before judging CTA presence', async
 test('applyEvidenceGuardrails rewrites absolute missing-CTA claims when CTAs are observed', () => {
   const report = applyEvidenceGuardrails({
     executive_summary: 'The site needs work.',
+    scores: {
+      conversion_readiness: {
+        score: 2,
+        grade: 'Weak',
+        note: 'No visible call-to-action or booking path exists.'
+      }
+    },
     top_weaknesses: [{
       title: 'No Conversion Path or Lead Mechanism',
       severity: 'High',
       detail: 'There is no visible call-to-action that moves a visitor toward a conversation.',
       fix: 'Install a booking CTA.'
+    }],
+    top_recommendations: [{
+      action: 'Install a frictionless CTA above the fold and in the footer',
+      impact: 'High',
+      timeframe: 'This week'
     }]
   }, {
     extraction: { mode: 'rendered', confidence: 'high', warnings: [] },
@@ -118,6 +130,8 @@ test('applyEvidenceGuardrails rewrites absolute missing-CTA claims when CTAs are
 
   assert.equal(report.top_weaknesses[0].title, 'Conversion Path Needs Stronger Qualification');
   assert.match(report.top_weaknesses[0].detail, /Book a Call/);
+  assert.match(report.scores.conversion_readiness.note, /Booking CTAs are present/);
+  assert.match(report.top_recommendations[0].action, /Strengthen the observed booking path/);
   assert.deepEqual(report.evidence_summary.observed_ctas, ['Book a Call (header)']);
 });
 

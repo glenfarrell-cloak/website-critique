@@ -22,6 +22,20 @@ That created a false impression that the project had been retired. The actual se
 - GitHub repo: https://github.com/glenfarrell-cloak/website-critique
 - Notion active registry: https://app.notion.com/p/391d15a4886c8100a8a8fd1438782171
 
+## Analyzer Correction Status
+
+On 2026-07-02, the Modern Consulting Group self-review mismatch was fixed and validated. The analyzer now renders JavaScript-driven sites, detects observed CTAs before scoring, and corrects absolute missing-CTA claims when booking evidence is present.
+
+For `https://modernconsultinggroup.com`, production validation detected:
+
+- `Book a Call [nav]`
+- `Book a 15-Minute Call [section]`
+- `Book a 15-Min Builder Chat [section]`
+- `Request a Sample [section]`
+- `Book a 15-Min Strategy Call [section]`
+
+The corrected critique is `Conversion Path Needs Stronger Qualification`, not `No Conversion Path or Lead Mechanism`.
+
 ## Cleanup Rule
 
 When future cleanup, archive, or second-brain consolidation work encounters:

@@ -4,6 +4,12 @@
 
 WebsiteCritique must produce evidence-grounded reviews. It should accurately detect calls to action, booking paths, conversion mechanisms, and credibility signals on modern JavaScript-rendered websites before assigning scores or making missing-feature claims.
 
+## Current Status
+
+Implemented, deployed, and validated on 2026-07-02.
+
+The analyzer now renders JavaScript-driven sites, preserves navigation and footer evidence, sends structured evidence to the LLM, exposes evidence coverage in the report, and applies deterministic guardrails when observed CTA evidence contradicts an absolute missing-CTA finding.
+
 ## Trigger
 
 Modern Consulting Group was reviewed at `https://modernconsultinggroup.com` and received a 34/80 score. The generated PDF said there was no visible conversion path or lead mechanism, but the live site includes booking CTAs in the header, body, and footer.
@@ -61,6 +67,23 @@ The report mismatch is primarily an extraction and evidence problem. The analyze
 - The generated report includes extraction coverage and observed conversion evidence.
 - Automated tests cover CTA detection in nav, body, footer, and rendered SPA content.
 
+## Validation Result
+
+Production validation from the Cloak runtime confirmed:
+
+- Extraction mode: `rendered`
+- Confidence: `high`
+- Warning: `spa_shell_detected`
+- Rendered text length: `3737`
+- Observed CTAs:
+  - `Book a Call [nav]`
+  - `Book a 15-Minute Call [section]`
+  - `Book a 15-Min Builder Chat [section]`
+  - `Request a Sample [section]`
+  - `Book a 15-Min Strategy Call [section]`
+
+When the old finding text is passed through the current guardrail, `No Conversion Path or Lead Mechanism` is corrected to `Conversion Path Needs Stronger Qualification`.
+
 ## Implementation Phases
 
 ### Phase 1: Evidence Extraction
@@ -78,4 +101,3 @@ Update report rendering to show evidence coverage, observed CTAs, and confidence
 ### Phase 4: Regression Verification
 
 Add fixtures and tests, re-run the Modern Consulting Group report, compare before/after output, and document deployment status.
-
