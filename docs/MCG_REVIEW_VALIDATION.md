@@ -38,6 +38,19 @@ Observed CTAs:
 - `Request a Sample [section]`
 - `Book a 15-Min Strategy Call [section]`
 
+## Stored Report Updates
+
+The stored production report rows for Modern Consulting Group were updated after backing up `data/submissions.json`.
+
+- Backup: `data/submissions.2026-07-03T00-02-08-890Z.bak.json`
+- Updated stale report: `https://portal.glenfarrell.net/WebsiteCritique/report/7d2efb79b8ae`
+- Updated stale report: `https://portal.glenfarrell.net/WebsiteCritique/report/5abcbc819265`
+- Fresh validation report: `https://portal.glenfarrell.net/WebsiteCritique/report/e5550f9dcc3f`
+
+The two stale reports now show `Conversion Path Needs Stronger Qualification` and include Evidence Coverage with observed CTAs.
+
+The fresh validation report scored Modern Consulting Group at `61/80` and did not include a missing-CTA or missing-conversion-path finding.
+
 ## Corrected Finding
 
 The correct critique is not that the site has no conversion path. The corrected finding is:
@@ -54,4 +67,4 @@ The system should say that booking CTAs are present, then evaluate whether those
 - Production tests on Cloak: `npm test` passes.
 - Public status endpoint: `https://portal.glenfarrell.net/WebsiteCritique/status` returns `status: ok`.
 - Production evidence extraction detects the MCG booking CTAs before the report/scoring step.
-
+- Live report pages for the stale report IDs no longer contain `No Conversion Path` or `No Conversion Architecture`.

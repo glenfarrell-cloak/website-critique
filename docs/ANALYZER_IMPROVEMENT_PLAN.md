@@ -84,6 +84,8 @@ Production validation from the Cloak runtime confirmed:
 
 When the old finding text is passed through the current guardrail, `No Conversion Path or Lead Mechanism` is corrected to `Conversion Path Needs Stronger Qualification`.
 
+Fresh validation report: `https://portal.glenfarrell.net/WebsiteCritique/report/e5550f9dcc3f`
+
 ## Implementation Phases
 
 ### Phase 1: Evidence Extraction

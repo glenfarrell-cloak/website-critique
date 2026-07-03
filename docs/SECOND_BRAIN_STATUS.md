@@ -36,6 +36,8 @@ For `https://modernconsultinggroup.com`, production validation detected:
 
 The corrected critique is `Conversion Path Needs Stronger Qualification`, not `No Conversion Path or Lead Mechanism`.
 
+Fresh validation report: https://portal.glenfarrell.net/WebsiteCritique/report/e5550f9dcc3f
+
 ## Cleanup Rule
 
 When future cleanup, archive, or second-brain consolidation work encounters:
